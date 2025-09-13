@@ -21,32 +21,24 @@ class RFDetrDetector:
         self.model = RFDETRBase(pretrain_weights=checkpoint_path)
         # optional for speed
         self.model.optimize_for_inference()
-
+        
     def predict(self, np_image: np.ndarray, conf_thresh: float):
         """
-        Parameters
-        ----------
-        np_image : np.ndarray
-            RGB image (H,W,3) uint8.
-        conf_thresh : float
-            Minimum confidence threshold.
-
         Returns
         -------
         list of dict
-            Each dict has keys: bbox, label, score
+            Each dict has keys: bbox, label, conf
         """
-        # convert back to PIL for RFDETR
         pil_img = Image.fromarray(np_image).convert("RGB")
         det = self.model.predict(pil_img, threshold=conf_thresh)
 
         results = []
         for bbox, cid, score in zip(det.xyxy, det.class_id, det.confidence):
-            # det.xyxy is an array of [x1, y1, x2, y2]
             label = self.CUSTOM_CLASSES[int(cid)] if int(cid) < len(self.CUSTOM_CLASSES) else str(cid)
             results.append({
                 "bbox": bbox.tolist(),
                 "label": label,
-                "score": float(score)
+                "conf": float(score)     # <---- key changed from "score" to "conf"
             })
         return results
+
