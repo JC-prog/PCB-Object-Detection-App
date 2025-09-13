@@ -12,51 +12,60 @@ from inference.rfdetr_detector import RFDetrDetector
 DETECTORS = {
     "YOLO": YOLODetector,
     "RT-DETR": RTDetrDetector,
-    "RF-DETR": RFDetrDetector
+    "RF-DETR": RFDetrDetector,
 }
 
 CHECKPOINT_DIR = "checkpoint"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-def _normalize_name(s: str) -> str:
-    """Remove non-alphanumeric and uppercase (for robust prefix matching)."""
-    return ''.join(ch for ch in (s or "") if ch.isalnum()).upper()
-
+# ---------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------
 def list_checkpoints(backend=None):
     """
-    Optionally filter by backend: "YOLO", "RT-DETR", "RF-DETR".
+    Return all .pt/.pth files in CHECKPOINT_DIR.
+    If backend is given, filter by preferred extension and
+    filenames that contain the backend key.
     """
-    files = os.listdir(CHECKPOINT_DIR)
-    if backend:
-        if backend.upper().startswith("YOLO"):
-            exts = (".pt",)
-            return [f for f in files if f.upper().startswith("YOLO") and f.endswith(exts)]
-        elif backend.upper().startswith("RT-DETR"):
-            return [f for f in files if f.upper().startswith("RTDETR") and f.endswith(".pt")]
-        elif backend.upper().startswith("RF-DETR"):
-            return [f for f in files if f.upper().startswith("RFDETR") and f.endswith(".pth")]
-    # default: show all
-    return [f for f in files if f.endswith((".pt", ".pth"))]
+    files = [f for f in os.listdir(CHECKPOINT_DIR) if f.lower().endswith((".pt", ".pth"))]
+    if not backend:
+        return files
 
-def refresh_checkpoints(selected_backend):
-    """
-    Refresh list according to currently selected backend.
-    """
-    return gr.Dropdown.update(choices=list_checkpoints(selected_backend), value=None)
+    key = backend.upper().replace("-", "").replace("_", "")
+    exts_map = {
+        "YOLO": (".pt",),
+        "RTDETR": (".pt",),
+        "RFDETR": (".pth",),
+    }
+    allowed_exts = exts_map.get(key, (".pt", ".pth"))
+    candidates = [f for f in files if f.lower().endswith(tuple(e.lower() for e in allowed_exts))]
+    # Prefer names containing the backend key
+    prefer = [f for f in candidates if key in f.upper().replace("-", "").replace("_", "")]
+    return prefer if prefer else candidates
 
-detector = None  # global detector instance
 
 def update_checkpoint_dropdown(backend_name):
-    """
-    Callback to update the checkpoint dropdown choices when backend is selected.
-    Returns a gr.update for the cp_dropdown.
-    """
     matches = list_checkpoints(backend_name)
     if matches:
         return gr.update(choices=matches, value=matches[0])
-    else:
-        # no matches: clear choices and value
+    return gr.update(choices=[], value=None)
+
+
+def refresh_checkpoints_preserve(backend_name, current_cp):
+    """
+    Refresh button callback: re-scan folder,
+    keep current selection if it still exists,
+    otherwise select the first match.
+    """
+    matches = list_checkpoints(backend_name)
+    if not matches:
         return gr.update(choices=[], value=None)
+    if current_cp in matches:
+        return gr.update(choices=matches, value=current_cp)
+    return gr.update(choices=matches, value=matches[0])
+
+
+detector = None  # global detector instance
 
 def load_model(backend_name, checkpoint_filename):
     global detector
@@ -73,6 +82,7 @@ def load_model(backend_name, checkpoint_filename):
         return f"Loaded {backend_name} model: {checkpoint_filename}"
     except Exception as e:
         return f"Failed to load: {e}"
+
 
 def run_detection(pil_image: Image.Image, conf_thresh: float, draw_centers: bool):
     if pil_image is None:
@@ -104,6 +114,7 @@ def run_detection(pil_image: Image.Image, conf_thresh: float, draw_centers: bool
     state_obj = {"image": pil_image, "detections": detections, "draw_centers": draw_centers}
     return overlay, labels_update, json_dict, state_obj
 
+
 def update_overlay(selected_labels, state_obj, draw_centers):
     if not state_obj:
         return None, {"detections": []}, None
@@ -121,13 +132,16 @@ def update_overlay(selected_labels, state_obj, draw_centers):
     json_dict = {"image_size": [image.width, image.height], "detections": filtered}
     return overlay, json_dict, state_obj
 
+
 CUSTOM_CSS = """
 body { background: #0f1724; color: #e6eef8; }
 .gradio-container { border-radius: 12px; padding: 18px; }
 h1 { color: #ffffff; }
 """
 
+# ---------------------------------------------------------------------
 # UI
+# ---------------------------------------------------------------------
 with gr.Blocks(css=CUSTOM_CSS, title="PCB Object Detection") as demo:
     gr.Markdown("# Modular Object Detection Demo")
 
@@ -157,28 +171,22 @@ with gr.Blocks(css=CUSTOM_CSS, title="PCB Object Detection") as demo:
                 load_btn = gr.Button("Load model")
                 refresh_btn = gr.Button("Refresh checkpoints")
             model_status = gr.Textbox(label="Model status", interactive=False)
-            conf_slider = gr.Slider(0.0, 1.0, value=0.25, step=0.01,
+            conf_slider = gr.Slider(0.0, 1.0, value=0.50, step=0.01,
                                     label="Confidence threshold")
 
     # ---------------- Events ----------------
-    # Update cp_dropdown whenever backend changes
     backend_dropdown.change(
         fn=update_checkpoint_dropdown,
         inputs=[backend_dropdown],
         outputs=[cp_dropdown]
     )
 
-    # Refresh button re-scans based on current backend
     refresh_btn.click(
-        fn=lambda backend: gr.Dropdown.update(
-            choices=list_checkpoints(backend),
-            value=None
-        ),
-        inputs=[backend_dropdown],
+        fn=refresh_checkpoints_preserve,
+        inputs=[backend_dropdown, cp_dropdown],
         outputs=[cp_dropdown]
     )
 
-    # Load and inference
     load_btn.click(load_model, [backend_dropdown, cp_dropdown], [model_status])
     submit.click(run_detection, [img_in, conf_slider, draw_centers_toggle],
                  [out_img, labels_check, json_output, state])
@@ -186,7 +194,6 @@ with gr.Blocks(css=CUSTOM_CSS, title="PCB Object Detection") as demo:
                         [out_img, json_output, state])
     draw_centers_toggle.change(update_overlay, [labels_check, state, draw_centers_toggle],
                                [out_img, json_output, state])
-
 
 if __name__ == "__main__":
     demo.launch(server_name="localhost", server_port=7860, share=False)
